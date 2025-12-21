@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "21"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Tests
+        run: npm test --if-present
+
+      - name: Install Semgrep
+        run: python3 -m pip install --upgrade pip semgrep
+
+      - name: Semgrep gate (fail on ERROR)
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: semgrep --config p/owasp-top-ten --severity ERROR --error
+
+      - name: Decide bump (major/minor/patch)
+        id: bump
+        run: |
+          set -euo pipefail
+          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+          if [ -n "$LAST_TAG" ]; then
+            RANGE="$LAST_TAG..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          LOG="$(git log --format=%B $RANGE)"
+          echo "$LOG" | grep -qi "BREAKING CHANGE" && { echo "type=major" >> $GITHUB_OUTPUT; exit 0; }
+          echo "$LOG" | grep -qiE "^feat(\(|:)" && { echo "type=minor" >> $GITHUB_OUTPUT; exit 0; }
+          echo "type=patch" >> $GITHUB_OUTPUT
+
+      - name: Bump npm version (not committed yet)
+        run: |
+          npm version ${{ steps.bump.outputs.type }} --no-git-tag-version
+          echo "VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
+      - name: Build image (version tag)
+        run: docker build -t sample-nodejs:${{ env.VERSION }} .
+
+      - name: Trivy scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: sample-nodejs:${{ env.VERSION }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "HIGH,CRITICAL"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image
+        run: |
+          docker tag sample-nodejs:${{ env.VERSION }} docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sample-nodejs:${{ env.VERSION }}
+          docker push docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sample-nodejs:${{ env.VERSION }}
+
+      - name: Update Helm chart versions + image tag
+        run: |
+          set -euo pipefail
+          # Chart.yaml: version + appVersion
+          sed -i "s/^version: .*/version: ${VERSION}/" charts/sample-nodejs/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/sample-nodejs/Chart.yaml
+
+          # values.yaml: image.repository + tag
+          sed -i "s|^  repository:.*|  repository: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sample-nodejs|" charts/sample-nodejs/values.yaml
+          sed -i "s|^  tag:.*|  tag: ${VERSION}|" charts/sample-nodejs/values.yaml
+
+      - name: Commit, tag, push (GitOps trigger)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json charts/sample-nodejs/Chart.yaml charts/sample-nodejs/values.yaml
+          git commit -m "chore(release): v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main --tags
+
