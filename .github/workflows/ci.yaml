@@ -52,19 +52,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Semgrep
-        run: python3 -m pip install --upgrade pip semgrep
-
-      - name: Semgrep scan (SARIF + fail on ERROR)
+      - name: Semgrep (SAST) - fail on HIGH/CRITICAL and generate SARIF
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/owasp-top-ten
+          generateSarif: "1"
+          sarifFile: semgrep.sarif
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-        run: |
-          set -euo pipefail
-          semgrep --version
-          semgrep --config p/owasp-top-ten \
-            --severity ERROR \
-            --sarif --output semgrep.sarif \
-            --error
 
       - name: Upload Semgrep SARIF
         if: always()
@@ -89,7 +84,7 @@ jobs:
           tags: sample-nodejs:ci
           provenance: false
 
-      - name: Trivy scan (SARIF + fail on HIGH/CRITICAL)
+      - name: Trivy scan (fail on HIGH/CRITICAL) + SARIF
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: sample-nodejs:ci
