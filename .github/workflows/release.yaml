@@ -2,30 +2,35 @@ name: Release
 
 on:
   workflow_run:
-    workflows: ["CI"] 
+    workflows: ["CI"]
     types: [completed]
-    branches: ["dev"]     
+    branches: ["dev"]
+  workflow_dispatch: {}
 
 permissions:
   contents: write
+  security-events: write
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_branch }}
+  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
   cancel-in-progress: true
 
 jobs:
   release:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Run only if CI succeeded
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+      )
     runs-on: ubuntu-latest
 
-    env:
-      IMAGE_NAME: sample-nodejs
-
     steps:
-      - name: Checkout the exact commit CI validated
+      - name: Checkout the exact commit that CI validated
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -39,34 +44,78 @@ jobs:
       - name: Tests
         run: npm test --if-present
 
-      - name: Semgrep gate (fail on ERROR/HIGH)
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/owasp-top-ten
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+      - name: Install Semgrep
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep
+
+      - name: Semgrep gate (fail on ERROR)
+        run: |
+          set -euo pipefail
+          semgrep --config p/owasp-top-ten --severity ERROR --error
 
       - name: Decide bump (major/minor/patch)
         id: bump
+        shell: bash
         run: |
           set -euo pipefail
-          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
-          if [ -n "$LAST_TAG" ]; then
+          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "${LAST_TAG:-}" ]; then
             RANGE="$LAST_TAG..HEAD"
           else
             RANGE="HEAD"
           fi
 
           LOG="$(git log --format=%B $RANGE)"
-          echo "$LOG" | grep -qi "BREAKING CHANGE" && { echo "type=major" >> "$GITHUB_OUTPUT"; exit 0; }
-          echo "$LOG" | grep -qiE "^feat(\(|:)" && { echo "type=minor" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          if echo "$LOG" | grep -qi "BREAKING CHANGE"; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$LOG" | grep -qiE '(^feat(\(|:))'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           echo "type=patch" >> "$GITHUB_OUTPUT"
 
-      - name: Bump npm version (not tagged yet)
+      - name: Bump npm version + refresh lockfile
+        shell: bash
         run: |
           set -euo pipefail
           npm version "${{ steps.bump.outputs.type }}" --no-git-tag-version
+          rm -rf node_modules
+          npm install --package-lock-only
           echo "VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+
+      - name: Compute & validate Docker image repo
+        shell: bash
+        env:
+          DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${DOCKERHUB_REPO:-}" ]; then
+            REPO="${DOCKERHUB_REPO}"
+          else
+            REPO="${DOCKERHUB_USERNAME}/sample-nodejs"
+          fi
+
+          
+          REPO="$(echo "$REPO" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+
+        
+          if ! echo "$REPO" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$'; then
+            echo "Invalid Docker repository name: '$REPO'"
+            echo "Fix secrets: DOCKERHUB_REPO or DOCKERHUB_USERNAME"
+            exit 1
+          fi
+
+          echo "IMAGE_REPO=$REPO" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$REPO:${VERSION}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=$REPO:latest" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -76,40 +125,58 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build image (local for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE_TAG }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
+      - name: Trivy scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "HIGH,CRITICAL"
+
+      # Push only after scan passes
       - name: Build & Push image (version + latest)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_LATEST }}
           provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      
-      - name: Trivy scan (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: "HIGH,CRITICAL"
-
-      - name: Update Helm chart versions + image tag
+      - name: Update Helm chart versions + image repo/tag
+        shell: bash
         run: |
           set -euo pipefail
+
+          
           sed -i "s/^version: .*/version: ${VERSION}/" charts/sample-nodejs/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/sample-nodejs/Chart.yaml
-          sed -i "s|^  repository:.*|  repository: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}|" charts/sample-nodejs/values.yaml
-          sed -i "s|^  tag:.*|  tag: ${VERSION}|" charts/sample-nodejs/values.yaml
+
+          
+          sed -i "s|^\(\s*repository:\s*\).*|\1${IMAGE_REPO}|" charts/sample-nodejs/values.yaml
+          sed -i "s|^\(\s*tag:\s*\).*|\1${VERSION}|" charts/sample-nodejs/values.yaml
 
       - name: Commit, tag, push (GitOps trigger)
+        shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add package.json package-lock.json charts/sample-nodejs/Chart.yaml charts/sample-nodejs/values.yaml
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
