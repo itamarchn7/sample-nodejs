@@ -4,24 +4,22 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: ["dev"]
   workflow_dispatch: {}
 
 permissions:
   contents: write
-  security-events: write
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
+  group: release-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
   release:
-    # Run only if CI succeeded
     if: >
       (github.event_name == 'workflow_dispatch') ||
       (
         github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'dev' &&
         !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
       )
     runs-on: ubuntu-latest
@@ -89,7 +87,7 @@ jobs:
           npm install --package-lock-only
           echo "VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
 
-      - name: Compute & validate Docker image repo
+      - name: Compute Docker image repo
         shell: bash
         env:
           DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
@@ -103,19 +101,16 @@ jobs:
             REPO="${DOCKERHUB_USERNAME}/sample-nodejs"
           fi
 
-          
           REPO="$(echo "$REPO" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 
-        
           if ! echo "$REPO" | grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$'; then
             echo "Invalid Docker repository name: '$REPO'"
-            echo "Fix secrets: DOCKERHUB_REPO or DOCKERHUB_USERNAME"
             exit 1
           fi
 
           echo "IMAGE_REPO=$REPO" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=$REPO:${VERSION}" >> "$GITHUB_ENV"
-          echo "IMAGE_LATEST=$REPO:latest" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=$REPO:dev-latest" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -125,6 +120,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build image (local for scan)
         uses: docker/build-push-action@v6
         with:
@@ -132,8 +128,6 @@ jobs:
           load: true
           tags: ${{ env.IMAGE_TAG }}
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Trivy scan (fail on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@0.28.0
@@ -144,15 +138,14 @@ jobs:
           ignore-unfixed: true
           severity: "HIGH,CRITICAL"
 
-      # Push only after scan passes
-      - name: Build & Push image (version + latest)
+      - name: Build & Push image (version + dev-latest)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE_TAG }}
-            ${{ env.IMAGE_LATEST }}
+            docker.io/${{ env.IMAGE_TAG }}
+            docker.io/${{ env.IMAGE_LATEST }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -162,15 +155,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          
           sed -i "s/^version: .*/version: ${VERSION}/" charts/sample-nodejs/Chart.yaml
           sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/sample-nodejs/Chart.yaml
 
-          
-          sed -i "s|^\(\s*repository:\s*\).*|\1${IMAGE_REPO}|" charts/sample-nodejs/values.yaml
+          sed -i "s|^\(\s*repository:\s*\).*|\1docker.io/${IMAGE_REPO}|" charts/sample-nodejs/values.yaml
           sed -i "s|^\(\s*tag:\s*\).*|\1${VERSION}|" charts/sample-nodejs/values.yaml
 
-      - name: Commit, tag, push (GitOps trigger)
+      - name: Commit, tag, push back to dev
         shell: bash
         run: |
           set -euo pipefail
@@ -180,5 +171,6 @@ jobs:
           git add package.json package-lock.json charts/sample-nodejs/Chart.yaml charts/sample-nodejs/values.yaml
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
-          git push origin HEAD --tags
+
+          git push origin HEAD:dev --tags
 
