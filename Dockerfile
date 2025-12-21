@@ -1,16 +1,19 @@
-FROM node:21-alpine
+FROM node:21-alpine AS build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
 
+FROM node:21-alpine
 WORKDIR /app
 
 RUN apk update && apk upgrade --no-cache
 
-COPY package*.json ./
-RUN npm ci --omit=dev
+RUN rm -rf /usr/local/lib/node_modules/npm \
+    /usr/local/bin/npm /usr/local/bin/npx || true
 
-COPY . .
+COPY --from=build /app /app
 RUN chown -R node:node /app
-
 USER node
-EXPOSE 8080
-CMD ["node","server.js"]
+CMD ["node", "app.js"]
 
