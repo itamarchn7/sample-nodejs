@@ -1,0 +1,52 @@
+name: CI Pipeline - Sample NodeJS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: itamarchn/sample-nodejs
+  GITOPS_REPO: itamarchn/sample-nodejs-gitops
+  VALUES_FILE: apps/sample-nodejs/values.yaml
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout code
+      - name: Checkout application repo
+        uses: actions/checkout@v4
+
+      # 2️⃣ Build Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t $IMAGE_NAME:${{ github.run_number }} .
+
+      # 3️⃣ Login to Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASS }}
+
+      # 4️⃣ Push Docker image
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:${{ github.run_number }}
+
+      # 5️⃣ Update GitOps repository
+      - name: Update GitOps repo with new image tag
+        run: |
+          git clone https://${{ secrets.GH_TOKEN }}@github.com/${GITOPS_REPO}.git gitops
+          cd gitops
+
+          sed -i 's/tag: .*/tag: "${{ github.run_number }}"/' $VALUES_FILE
+
+          git config user.email "ci@github-actions"
+          git config user.name "github-actions"
+
+          git add $VALUES_FILE
+          git commit -m "Update image tag to ${{ github.run_number }}"
+          git push
