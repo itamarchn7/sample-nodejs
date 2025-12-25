@@ -9,7 +9,7 @@ env:
   IMAGE_NAME: itamarchn/sample-nodejs
   GITOPS_REPO: itamarchn7/sample-nodejs-gitops
   VALUES_FILE: helm/values.yaml
-  BASE_VERSION: 1.0
+  BASE_VERSION: '1.0'
 
 jobs:
   build-and-deploy:
