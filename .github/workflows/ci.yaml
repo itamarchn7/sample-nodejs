@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  IMAGE_NAME: itamarchn7/sample-nodejs
+  IMAGE_NAME: itamarchn/sample-nodejs
   GITOPS_REPO: itamarchn7/sample-nodejs-gitops
   VALUES_FILE: apps/sample-nodejs/values.yaml
 
