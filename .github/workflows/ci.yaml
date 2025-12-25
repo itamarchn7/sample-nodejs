@@ -20,38 +20,51 @@ jobs:
       - name: Checkout application repo
         uses: actions/checkout@v4
 
-      # 2 Calculate version
+      # 2 SAST – Static Application Security Testing
+      - name: SAST - Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/nodejs
+        env:
+          SEMGREP_FAIL_ON_SEVERITY: ERROR
+
+      # 3 Calculate version
       - name: Calculate SemVer
         id: version
         run: |          
           PATCH=${{ github.run_number }}
           echo "IMAGE_TAG=${BASE_VERSION}.${PATCH}" >> $GITHUB_ENV
 
-      # 3 Build Docker image
+      # 4 Build Docker image
       - name: Build Docker image
-        run: |
-          docker build -t $IMAGE_NAME:${IMAGE_TAG} .
+        run: docker build -t $IMAGE_NAME:${IMAGE_TAG} .
 
-      # 4 Login to Docker Hub
+      # 5 Scan Docker image for vulnerabilities
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+      # 6 Login to Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASS }}
-
-      # 5 Push Docker image
+      
+      # 7 Push Docker image
       - name: Push Docker image
-        run: |
-          docker push $IMAGE_NAME:${IMAGE_TAG}
+        run: docker push $IMAGE_NAME:${IMAGE_TAG}
 
-      # 6 Update GitOps repository
+      # 8 Update GitOps repository
       - name: Update GitOps repo with new image tag
         run: |
           git clone https://${{ secrets.GH_TOKEN }}@github.com/${GITOPS_REPO}.git gitops
           cd gitops
 
           sed -i 's/tag: .*/tag: "'${IMAGE_TAG}'"/' $VALUES_FILE
-
 
           git config user.email "ci@github-actions"
           git config user.name "github-actions"
