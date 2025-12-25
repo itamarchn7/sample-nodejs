@@ -50,7 +50,8 @@ jobs:
           git clone https://${{ secrets.GH_TOKEN }}@github.com/${GITOPS_REPO}.git gitops
           cd gitops
 
-          sed -i 's/tag: .*/tag: ${IMAGE_TAG}/' $VALUES_FILE
+          sed -i 's/tag: .*/tag: "'${IMAGE_TAG}'"/' $VALUES_FILE
+
 
           git config user.email "ci@github-actions"
           git config user.name "github-actions"
