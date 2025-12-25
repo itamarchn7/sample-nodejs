@@ -8,7 +8,7 @@ on:
 env:
   IMAGE_NAME: itamarchn/sample-nodejs
   GITOPS_REPO: itamarchn7/sample-nodejs-gitops
-  VALUES_FILE: apps/sample-nodejs/values.yaml
+  VALUES_FILE: helm/values.yaml
 
 jobs:
   build-and-deploy:
