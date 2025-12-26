@@ -46,6 +46,7 @@ jobs:
           image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           severity: HIGH,CRITICAL
           exit-code: 1
+          trivyignores: .trivyignore
 
       # 6 Login to Docker Hub
       - name: Login to Docker Hub

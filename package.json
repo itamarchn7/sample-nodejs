@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "start": "node app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -10,7 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "cross-spawn": "^7.0.6",
+    "cross-spawn": "^7.0.5",
     "express": "^4.21.2",
     "glob": "^10.5.0",
     "prom-client": "^15.1.3"
